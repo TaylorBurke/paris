@@ -6,7 +6,7 @@ A single-file browser tool for selecting one image per batch and downloading the
 
 ## Usage
 
-1. Open `index.html` in any modern browser.
+1. Download and open `index.html` in any modern browser. Or go to https://paris-9v9.pages.dev/ if you prefer.
 2. Drag and drop image files onto the upload zone (or click to browse).
 3. Files are grouped by their leading number prefix — e.g., `1_a.jpg` and `1_b.jpg` form batch 1.
 4. Click an image to select it. The next batch appears automatically.
