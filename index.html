@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Image Batch Picker</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #f5f5f5;
+    color: #333;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+
+  h1 { font-size: 1.5rem; margin: 2rem 0 1rem; }
+
+  .screen { display: none; width: 100%; max-width: 960px; padding: 0 1rem 2rem; }
+  .screen.active { display: block; }
+
+  /* Upload screen */
+  #drop-zone {
+    border: 3px dashed #aaa;
+    border-radius: 12px;
+    padding: 4rem 2rem;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color .2s, background .2s;
+  }
+  #drop-zone.dragover { border-color: #4a90d9; background: #e8f0fe; }
+  #drop-zone p { font-size: 1.1rem; color: #666; margin-bottom: 1rem; }
+
+  .btn {
+    display: inline-block;
+    padding: .6rem 1.4rem;
+    border: none;
+    border-radius: 6px;
+    font-size: .95rem;
+    cursor: pointer;
+    background: #4a90d9;
+    color: #fff;
+    transition: background .2s;
+  }
+  .btn:hover { background: #3a7bc8; }
+  .btn-secondary { background: #777; }
+  .btn-secondary:hover { background: #555; }
+
+  /* Batch screen */
+  .batch-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+  }
+  .batch-header .progress { font-size: 1.1rem; font-weight: 600; }
+
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 12px;
+  }
+
+  .thumb {
+    position: relative;
+    border-radius: 8px;
+    overflow: hidden;
+    cursor: pointer;
+    border: 3px solid transparent;
+    transition: border-color .15s, transform .15s;
+    aspect-ratio: 1;
+    background: #ddd;
+  }
+  .thumb:hover { transform: scale(1.03); border-color: #4a90d9; }
+  .thumb.selected { border-color: #2ecc71; }
+  .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb .label {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    padding: 4px 6px;
+    background: rgba(0,0,0,.55);
+    color: #fff;
+    font-size: .75rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* Results screen */
+  .results-actions {
+    display: flex;
+    gap: .75rem;
+    margin-bottom: 1rem;
+  }
+</style>
+</head>
+<body>
+
+<h1>Image Batch Picker</h1>
+
+<!-- Upload Screen -->
+<div id="screen-upload" class="screen active">
+  <div id="drop-zone">
+    <p>Drag &amp; drop image files here, or click to browse</p>
+    <button class="btn" id="btn-browse">Choose Files</button>
+    <input type="file" id="file-input" multiple accept="image/*" hidden>
+  </div>
+</div>
+
+<!-- Batch Screen -->
+<div id="screen-batch" class="screen">
+  <div class="batch-header">
+    <button class="btn btn-secondary" id="btn-back">&#8592; Back</button>
+    <span class="progress" id="batch-progress"></span>
+    <span></span>
+  </div>
+  <div class="grid" id="batch-grid"></div>
+</div>
+
+<!-- Results Screen -->
+<div id="screen-results" class="screen">
+  <h2 style="margin-bottom:1rem;">Your Selections</h2>
+  <div class="results-actions">
+    <button class="btn" id="btn-download">Download ZIP</button>
+    <button class="btn btn-secondary" id="btn-start-over">Start Over</button>
+  </div>
+  <div class="grid" id="results-grid"></div>
+</div>
+
+<script>
+(function () {
+  // ---- State ----
+  let groups = [];       // [{key: number, files: File[]}]
+  let currentIndex = 0;
+  let selections = {};   // groupKey -> File
+  let objectURLs = [];   // track for cleanup
+
+  // ---- DOM refs ----
+  const screenUpload  = document.getElementById('screen-upload');
+  const screenBatch   = document.getElementById('screen-batch');
+  const screenResults = document.getElementById('screen-results');
+  const dropZone      = document.getElementById('drop-zone');
+  const fileInput     = document.getElementById('file-input');
+  const btnBrowse     = document.getElementById('btn-browse');
+  const btnBack       = document.getElementById('btn-back');
+  const batchProgress = document.getElementById('batch-progress');
+  const batchGrid     = document.getElementById('batch-grid');
+  const resultsGrid   = document.getElementById('results-grid');
+  const btnDownload   = document.getElementById('btn-download');
+  const btnStartOver  = document.getElementById('btn-start-over');
+
+  // ---- Helpers ----
+  function showScreen(el) {
+    [screenUpload, screenBatch, screenResults].forEach(s => s.classList.remove('active'));
+    el.classList.add('active');
+  }
+
+  function parsePrefix(filename) {
+    const match = filename.match(/^(\d+)/);
+    return match ? parseInt(match[1], 10) : NaN;
+  }
+
+  function revokeAll() {
+    objectURLs.forEach(u => URL.revokeObjectURL(u));
+    objectURLs = [];
+  }
+
+  function makeURL(file) {
+    const url = URL.createObjectURL(file);
+    objectURLs.push(url);
+    return url;
+  }
+
+  // ---- Grouping ----
+  function buildGroups(files) {
+    const map = {};
+    for (const file of files) {
+      const key = parsePrefix(file.name);
+      if (isNaN(key)) continue; // skip files without a numeric prefix
+      if (!map[key]) map[key] = [];
+      map[key].push(file);
+    }
+    groups = Object.keys(map)
+      .map(Number)
+      .sort((a, b) => a - b)
+      .map(k => ({ key: k, files: map[k] }));
+  }
+
+  // ---- Batch rendering ----
+  function renderBatch() {
+    if (currentIndex >= groups.length) {
+      renderResults();
+      return;
+    }
+    const group = groups[currentIndex];
+    batchProgress.textContent = 'Batch ' + (currentIndex + 1) + ' of ' + groups.length + ' (group ' + group.key + ')';
+    btnBack.style.visibility = currentIndex === 0 ? 'hidden' : 'visible';
+
+    batchGrid.innerHTML = '';
+    group.files.forEach(file => {
+      const div = document.createElement('div');
+      div.className = 'thumb';
+      if (selections[group.key] === file) div.classList.add('selected');
+
+      const img = document.createElement('img');
+      img.src = makeURL(file);
+      img.alt = file.name;
+      div.appendChild(img);
+
+      const label = document.createElement('div');
+      label.className = 'label';
+      label.textContent = file.name;
+      div.appendChild(label);
+
+      div.addEventListener('click', () => {
+        selections[group.key] = file;
+        currentIndex++;
+        renderBatch();
+      });
+
+      batchGrid.appendChild(div);
+    });
+
+    showScreen(screenBatch);
+  }
+
+  // ---- Results rendering ----
+  function renderResults() {
+    resultsGrid.innerHTML = '';
+    groups.forEach(group => {
+      const file = selections[group.key];
+      if (!file) return;
+      const div = document.createElement('div');
+      div.className = 'thumb selected';
+
+      const img = document.createElement('img');
+      img.src = makeURL(file);
+      img.alt = file.name;
+      div.appendChild(img);
+
+      const label = document.createElement('div');
+      label.className = 'label';
+      label.textContent = file.name;
+      div.appendChild(label);
+
+      resultsGrid.appendChild(div);
+    });
+    showScreen(screenResults);
+  }
+
+  // ---- Upload handling ----
+  function handleFiles(fileList) {
+    const images = Array.from(fileList).filter(f => f.type.startsWith('image/'));
+    if (images.length === 0) return;
+    revokeAll();
+    selections = {};
+    currentIndex = 0;
+    buildGroups(images);
+    if (groups.length === 0) {
+      alert('No files with a numeric prefix were found. Name files like 1_photo.jpg, 2_photo.jpg, etc.');
+      return;
+    }
+    renderBatch();
+  }
+
+  // ---- Events: Upload ----
+  btnBrowse.addEventListener('click', () => fileInput.click());
+  dropZone.addEventListener('click', e => { if (e.target === dropZone || e.target.tagName === 'P') fileInput.click(); });
+  fileInput.addEventListener('change', () => { if (fileInput.files.length) handleFiles(fileInput.files); });
+
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('dragover');
+    if (e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
+  });
+
+  // ---- Events: Batch ----
+  btnBack.addEventListener('click', () => {
+    if (currentIndex > 0) { currentIndex--; renderBatch(); }
+  });
+
+  // ---- Events: Results ----
+  btnStartOver.addEventListener('click', () => {
+    revokeAll();
+    groups = [];
+    currentIndex = 0;
+    selections = {};
+    fileInput.value = '';
+    batchGrid.innerHTML = '';
+    resultsGrid.innerHTML = '';
+    showScreen(screenUpload);
+  });
+
+  btnDownload.addEventListener('click', async () => {
+    const zip = new JSZip();
+    const entries = Object.values(selections);
+    if (entries.length === 0) return;
+
+    for (const file of entries) {
+      zip.file(file.name, file);
+    }
+
+    btnDownload.textContent = 'Generating…';
+    btnDownload.disabled = true;
+    try {
+      const blob = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'selections.zip';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      alert('Failed to generate ZIP: ' + err.message);
+    } finally {
+      btnDownload.textContent = 'Download ZIP';
+      btnDownload.disabled = false;
+    }
+  });
+})();
+</script>
+</body>
+</html>
