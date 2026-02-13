@@ -2,6 +2,8 @@
 
 A single-file browser tool for selecting one image per batch and downloading the picks as a ZIP.
 
+![Screenshot of the upload screen](batch_picker.png)
+
 ## Usage
 
 1. Open `index.html` in any modern browser.
